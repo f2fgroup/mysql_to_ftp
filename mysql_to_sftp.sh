@@ -143,20 +143,27 @@ ${into_clause};"
     mysql_cmd+=" -h${MYSQL_HOST}"
     mysql_cmd+=" -P${MYSQL_PORT}"
     mysql_cmd+=" -u${MYSQL_USER}"
-    
-    if [[ -n "$MYSQL_PASSWORD" ]]; then
-        mysql_cmd+=" -p${MYSQL_PASSWORD}"
-    fi
-    
     mysql_cmd+=" ${MYSQL_DATABASE}"
     mysql_cmd+=" -e"
     
     # Set UTF-8 encoding
     local full_query="SET NAMES utf8mb4; ${complete_query}"
     
-    if ! echo "$full_query" | $mysql_cmd; then
-        log_error "Failed to execute query"
-        return 1
+    # Execute with password passed via stdin to avoid command line exposure
+    if [[ -n "$MYSQL_PASSWORD" ]]; then
+        if ! echo "$full_query" | mysql --defaults-extra-file=<(cat <<EOF
+[client]
+password=${MYSQL_PASSWORD}
+EOF
+) -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" -e "$(cat)"; then
+            log_error "Failed to execute query"
+            return 1
+        fi
+    else
+        if ! echo "$full_query" | $mysql_cmd; then
+            log_error "Failed to execute query"
+            return 1
+        fi
     fi
     
     # Verify the output file was created
@@ -207,16 +214,20 @@ EOF
             rm -f "$sftp_batch"
             return 1
         fi
-        sftp_cmd="sshpass -p ${SFTP_PASSWORD} ${sftp_cmd}"
+        # Use SSHPASS environment variable to avoid password in process list
+        export SSHPASS="$SFTP_PASSWORD"
+        sftp_cmd="sshpass -e ${sftp_cmd}"
     fi
     
     if eval "$sftp_cmd"; then
         log "Successfully uploaded: $remote_final"
         rm -f "$sftp_batch"
+        unset SSHPASS
         return 0
     else
         log_error "Failed to upload file to SFTP"
         rm -f "$sftp_batch"
+        unset SSHPASS
         return 1
     fi
 }
