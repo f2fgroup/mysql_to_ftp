@@ -1,0 +1,27 @@
+# Environment and configuration files with credentials
+.env
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.part
+
+# CSV output files (optional - comment out if you want to track them)
+*.csv
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*~
