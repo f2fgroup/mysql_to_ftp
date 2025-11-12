@@ -53,6 +53,26 @@ cp config.env.example .env
 vim .env
 ```
 
+### Optional: Quick local MySQL setup
+
+If you don't have MySQL installed locally, you can use the helper script to install and configure it using your `.env`/`config.env` values (database, user, password, and secure_file_priv):
+
+```bash
+chmod +x install_mysql_local.sh
+# Uses .env if present, otherwise config.env
+./install_mysql_local.sh
+
+# Or specify a custom env file
+./install_mysql_local.sh --config /path/to/your.env
+```
+
+What this does:
+- Installs `mysql-server` and `mysql-client` via apt
+- Ensures `secure_file_priv` equals your `OUTPUT_DIR`
+- Creates the database and user, and grants `FILE` + full access to the DB
+- Verifies a basic connection using your credentials
+
+
 ## Configuration
 
 ### Environment Variables

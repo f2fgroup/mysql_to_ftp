@@ -1,5 +1,6 @@
 # Environment and configuration files with credentials
 .env
+config.env
 
 # Log files
 *.log
