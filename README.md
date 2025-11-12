@@ -72,6 +72,24 @@ What this does:
 - Creates the database and user, and grants `FILE` + full access to the DB
 - Verifies a basic connection using your credentials
 
+### Optional: Seed test data
+
+You can populate the database with simple test data (tables will be created if missing). This is intended for local testing only.
+
+```bash
+chmod +x seed_database.sh
+./seed_database.sh
+
+# Or specify a custom env file
+./seed_database.sh --config /path/to/your.env
+```
+
+What this does:
+- Warns and asks for confirmation since it will alter the database
+- Creates four tables if needed: `users`, `categories`, `products`, `orders`
+- Inserts at least 100 random rows in each table (skips if already >= 100)
+- Uses MySQL 8 features (recursive CTEs)
+
 
 ## Configuration
 
@@ -145,11 +163,11 @@ The script generates CSV files with the following format (as per specification):
 ### Basic Usage
 
 ```bash
-# Source your configuration
-source .env
-
-# Run the script
+# Run the script (auto-loads .env if present, else config.env)
 ./mysql_to_sftp.sh
+
+# Or specify a custom env file
+./mysql_to_sftp.sh --config /path/to/your.env
 ```
 
 ### Using Environment Variables Directly

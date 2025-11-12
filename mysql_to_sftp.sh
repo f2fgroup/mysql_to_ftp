@@ -12,6 +12,34 @@
 
 set -euo pipefail
 
+# --- Config loading: support --config or auto-load .env/config.env ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE=""
+
+# Parse only --config; ignore other args (script itself doesn't use CLI args)
+for arg in "$@"; do
+    case "$arg" in
+        --config=*) CONFIG_FILE="${arg#*=}" ;;
+        --config) shift; CONFIG_FILE="${1:-}" ;;
+    esac
+done
+
+# Decide env file to source
+if [[ -z "${CONFIG_FILE}" ]]; then
+    if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+        CONFIG_FILE="${SCRIPT_DIR}/.env"
+    elif [[ -f "${SCRIPT_DIR}/config.env" ]]; then
+        CONFIG_FILE="${SCRIPT_DIR}/config.env"
+    else
+        CONFIG_FILE=""
+    fi
+fi
+
+if [[ -n "${CONFIG_FILE}" && -f "${CONFIG_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "${CONFIG_FILE}"; set +a
+fi
+
 # Default configuration
 SQL_DIR="${SQL_DIR:-sql/queries}"
 OUTPUT_DIR="${OUTPUT_DIR:-/var/lib/mysql-files}"
