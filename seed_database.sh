@@ -151,15 +151,16 @@ seed_users() {
   local need=$(( target - count )); if (( need <= 0 )); then log "users already has ${count} rows (>= ${target}), skipping"; return; fi
   log "Inserting ${need} user rows..."
   mysql_exec_file "
-WITH RECURSIVE seq(n) AS (
-  SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${need}
-)
+SET @i := 0;
 INSERT INTO users (name, email, active, created_at)
-SELECT CONCAT('User ', n),
-       CONCAT('user', n + ${count}, '@example.com'),
+SELECT CONCAT('User ', s.seq),
+       CONCAT('user', s.seq, '@example.com'),
        IF(RAND() < 0.85, 1, 0),
        NOW() - INTERVAL FLOOR(RAND()*365) DAY
-FROM seq
+FROM (
+  SELECT (@i := @i + 1 + ${count}) AS seq
+  FROM (SELECT 1 FROM information_schema.COLUMNS LIMIT ${need}) t
+) AS s
 ON DUPLICATE KEY UPDATE name=VALUES(name), active=VALUES(active), created_at=VALUES(created_at);
 "
 }
@@ -169,11 +170,13 @@ seed_categories() {
   local need=$(( target - count )); if (( need <= 0 )); then log "categories already has ${count} rows (>= ${target}), skipping"; return; fi
   log "Inserting ${need} category rows..."
   mysql_exec_file "
-WITH RECURSIVE seq(n) AS (
-  SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${need}
-)
+SET @i := 0;
 INSERT INTO categories (category_name)
-SELECT CONCAT('Category ', n + ${count}) FROM seq
+SELECT CONCAT('Category ', s.seq)
+FROM (
+  SELECT (@i := @i + 1 + ${count}) AS seq
+  FROM (SELECT 1 FROM information_schema.COLUMNS LIMIT ${need}) t
+) AS s
 ON DUPLICATE KEY UPDATE category_name=VALUES(category_name);
 "
 }
@@ -183,14 +186,15 @@ seed_products() {
   local need=$(( target - count )); if (( need <= 0 )); then log "products already has ${count} rows (>= ${target}), skipping"; return; fi
   log "Inserting ${need} product rows..."
   mysql_exec_file "
-WITH RECURSIVE seq(n) AS (
-  SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${need}
-)
+SET @i := 0;
 INSERT INTO products (product_name, category_id, price)
-SELECT CONCAT('Product ', n + ${count}),
+SELECT CONCAT('Product ', s.seq),
        (SELECT category_id FROM categories ORDER BY RAND() LIMIT 1),
        ROUND(RAND()*200 + 1, 2)
-FROM seq
+FROM (
+  SELECT (@i := @i + 1 + ${count}) AS seq
+  FROM (SELECT 1 FROM information_schema.COLUMNS LIMIT ${need}) t
+) AS s
 ON DUPLICATE KEY UPDATE product_name=VALUES(product_name), category_id=VALUES(category_id), price=VALUES(price);
 "
 }
@@ -200,16 +204,17 @@ seed_orders() {
   local need=$(( target - count )); if (( need <= 0 )); then log "orders already has ${count} rows (>= ${target}), skipping"; return; fi
   log "Inserting ${need} order rows..."
   mysql_exec_file "
-WITH RECURSIVE seq(n) AS (
-  SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${need}
-)
+SET @i := 0;
 INSERT INTO orders (customer_id, order_date, total_amount, status)
 SELECT 
   (SELECT id FROM users ORDER BY RAND() LIMIT 1) AS customer_id,
   NOW() - INTERVAL FLOOR(RAND()*60) DAY AS order_date,
   ROUND(RAND()*500 + 10, 2) AS total_amount,
   ELT(FLOOR(RAND()*4)+1, 'pending','paid','shipped','cancelled') AS status
-FROM seq;
+FROM (
+  SELECT (@i := @i + 1) AS seq
+  FROM (SELECT 1 FROM information_schema.COLUMNS LIMIT ${need}) t
+) AS s;
 "
 }
 
