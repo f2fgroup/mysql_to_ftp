@@ -33,28 +33,43 @@ run_root() {
 apt_install() {
   local pkgs=("$@")
   if need_sudo; then
-    sudo -n apt-get update -y
-    sudo -n apt-get install -y "${pkgs[@]}"
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -y
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -yq "${pkgs[@]}"
   else
-    apt-get update -y
-    apt-get install -y "${pkgs[@]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -yq "${pkgs[@]}"
   fi
 }
 
 start_mysql_service() {
-  if command -v systemctl >/dev/null 2>&1; then
+  # Prefer systemctl only when systemd is actually running (not the case in many containers)
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')" = "systemd" ]; then
     if need_sudo; then
       sudo -n systemctl enable --now mysql || sudo -n systemctl restart mysql
     else
       systemctl enable --now mysql || systemctl restart mysql
     fi
   else
+    # Fallback to SysV-style service management (works well in Docker)
     if need_sudo; then
-      sudo -n service mysql start || sudo -n service mysql restart
+      sudo -n service mysql start || sudo -n service mysql restart || sudo -n /etc/init.d/mysql start || true
     else
-      service mysql start || service mysql restart
+      service mysql start || service mysql restart || /etc/init.d/mysql start || true
     fi
   fi
+}
+
+# Wait for MySQL to be ready (TCP ping)
+wait_for_mysql() {
+  local retries=30
+  local i
+  for i in $(seq 1 ${retries}); do
+    if mysqladmin --protocol=TCP -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" ping --silent >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 # Escape single quotes for SQL string literal
@@ -120,6 +135,15 @@ apt_install mysql-server mysql-client
 log "Ensuring MySQL service is running..."
 start_mysql_service
 
+# Ensure socket directory exists in containerized environments
+run_root "mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld && chmod 755 /run/mysqld" || true
+
+log "Waiting for MySQL to be ready..."
+if ! wait_for_mysql; then
+  err "MySQL did not become ready in time on ${MYSQL_HOST}:${MYSQL_PORT}"
+  exit 1
+fi
+
 # Ensure output directory exists and is owned by mysql
 log "Configuring secure file directory: ${OUTPUT_DIR}"
 run_root "mkdir -p '${OUTPUT_DIR}'"
@@ -179,8 +203,9 @@ if ! mysql --protocol=TCP -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" 
   exit 1
 fi
 
-# Show secure_file_priv for confirmation
-mysql -uroot -e "SHOW VARIABLES LIKE 'secure_file_priv';" || true
+# Show secure_file_priv for confirmation using app user over TCP (avoid socket)
+mysql --protocol=TCP -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" "${MYSQL_DATABASE}" \
+  -e "SHOW VARIABLES LIKE 'secure_file_priv';" || true
 
 log "MySQL installation and configuration complete."
 log "- Database: ${MYSQL_DATABASE}"
