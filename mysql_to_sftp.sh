@@ -141,7 +141,7 @@ prepare_host_key_options() {
     local opts=""
     SFTP_KNOWN_HOSTS_TEMP=""
     if [[ "${SFTP_DISABLE_HOST_KEY_CHECKING}" == "true" ]]; then
-        log "Host key verification is DISABLED (StrictHostKeyChecking=no)"
+        log "Host key verification is DISABLED (StrictHostKeyChecking=no)" >/dev/null
         opts+=" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null"
         echo "$opts"
         return 0
@@ -149,7 +149,7 @@ prepare_host_key_options() {
 
     # Strict host key checking
     if [[ -n "${SFTP_KNOWN_HOSTS}" && -f "${SFTP_KNOWN_HOSTS}" ]]; then
-        log "Using provided known_hosts file: ${SFTP_KNOWN_HOSTS}"
+        log "Using provided known_hosts file: ${SFTP_KNOWN_HOSTS}" >/dev/null
         opts+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${SFTP_KNOWN_HOSTS}"
         echo "$opts"
         return 0
@@ -167,10 +167,162 @@ prepare_host_key_options() {
         SFTP_KNOWN_HOSTS_TEMP=""
         return 1
     fi
-    log "Using generated known_hosts for ${SFTP_HOST}:${SFTP_PORT}"
+    log "Using generated known_hosts for ${SFTP_HOST}:${SFTP_PORT}" >/dev/null
     opts+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${SFTP_KNOWN_HOSTS_TEMP}"
     echo "$opts"
     return 0
+}
+
+# Run an sftp batch with prepared options; expects hostkey_opts in "$1" and batch content in "$2"
+run_sftp_batch() {
+    local hostkey_opts="$1"
+    local batch_content="$2"
+
+    # Convert hostkey opts string to array tokens
+    local extra_opts=()
+    if [[ -n "$hostkey_opts" ]]; then
+        # shellcheck disable=SC2206
+        extra_opts=($hostkey_opts)
+    fi
+
+    local cmd=( sftp )
+    cmd+=( "${extra_opts[@]}" )
+    if [[ -n "$SFTP_PASSWORD" && -z "$SFTP_KEY_FILE" ]]; then
+        cmd+=( -o PreferredAuthentications=password -o PubkeyAuthentication=no -o BatchMode=no -o NumberOfPasswordPrompts=1 )
+    fi
+    cmd+=( -P "${SFTP_PORT}" -b - )
+    if [[ -n "$SFTP_KEY_FILE" ]]; then
+        cmd+=( -i "${SFTP_KEY_FILE}" )
+    fi
+    cmd+=( "${SFTP_USER}@${SFTP_HOST}" )
+
+    if [[ "${DEBUG_SFTP:-false}" == "true" ]]; then
+        {
+            printf "[debug] sftp cmd: ";
+            printf "%q " "${cmd[@]}";
+            printf "\n";
+        } | tee -a "$LOG_FILE" >/dev/null
+    fi
+
+    local status=0
+    local out
+    if [[ -n "$SFTP_PASSWORD" && -z "$SFTP_KEY_FILE" ]]; then
+        if command -v sshpass >/dev/null 2>&1; then
+            out=$(SSHPASS="$SFTP_PASSWORD" sshpass -e "${cmd[@]}" <<< "$batch_content" 2>&1) || status=$?
+        else
+            log_error "sshpass not found for password authentication"
+            status=1
+        fi
+    else
+        out=$("${cmd[@]}" <<< "$batch_content" 2>&1) || status=$?
+    fi
+    if [[ -n "$out" ]]; then
+        echo "$out" | sed 's/^/[sftp] /' | tee -a "$LOG_FILE" >/dev/null
+    fi
+    return $status
+}
+
+# Test SFTP connection and ensure remote directory exists (mkdir -p like)
+ensure_sftp_connection_and_remote_dir() {
+    local hostkey_opts
+    if ! hostkey_opts=$(prepare_host_key_options); then
+        log_error "Host key verification setup failed"
+        return 1
+    fi
+
+    # Basic connectivity test
+    if ! run_sftp_batch "$hostkey_opts" $'pwd\nbye'; then
+        log_error "Failed to connect to SFTP server ${SFTP_HOST}:${SFTP_PORT} as ${SFTP_USER}"
+        # Cleanup any temp known_hosts
+        if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
+        return 1
+    fi
+    log "SFTP connectivity OK"
+
+    # Check if remote dir exists; if not, create progressively
+    if run_sftp_batch "$hostkey_opts" "ls ${SFTP_REMOTE_DIR}"$'\nbye'; then
+        log "Remote directory exists: ${SFTP_REMOTE_DIR}"
+        if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
+        return 0
+    fi
+
+    log "Remote directory missing; creating: ${SFTP_REMOTE_DIR}"
+    local path="${SFTP_REMOTE_DIR}"
+    # Normalize path to absolute-like sequence processing
+    # Build progressive paths and create when absent
+    local IFS='/'
+    local part
+    local progressive=""
+    # Preserve leading slash
+    if [[ "$path" == /* ]]; then progressive="/"; fi
+    # Read path components
+    read -r -a parts <<< "${path#/}"
+    local fallback_to_relative=false
+    for part in "${parts[@]}"; do
+        [[ -z "$part" ]] && continue
+        if [[ "$progressive" == "/" ]]; then
+            progressive="/${part}"
+        elif [[ -z "$progressive" ]]; then
+            progressive="$part"
+        else
+            progressive="${progressive}/${part}"
+        fi
+        # Check and create this level if needed
+        if ! run_sftp_batch "$hostkey_opts" "ls ${progressive}"$'\nbye'; then
+            if ! run_sftp_batch "$hostkey_opts" "mkdir ${progressive}"$'\nbye'; then
+                # If absolute path creation fails (likely permission), try home-relative fallback once
+                if [[ "$path" == /* ]]; then
+                    fallback_to_relative=true
+                    break
+                fi
+                log_error "Failed to create remote directory: ${progressive}"
+                if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
+                return 1
+            fi
+            log "Created remote directory: ${progressive}"
+        fi
+    done
+
+    if [[ "$fallback_to_relative" == true ]]; then
+        local rel
+        if [[ "$path" == "/home/${SFTP_USER}/"* ]]; then
+            rel="${path#/home/${SFTP_USER}/}"
+        else
+            rel="${path#/}"
+        fi
+        log "Falling back to home-relative path: ${rel}"
+        progressive=""
+        IFS='/' read -r -a parts <<< "$rel"
+        for part in "${parts[@]}"; do
+            [[ -z "$part" ]] && continue
+            if [[ -z "$progressive" ]]; then
+                progressive="$part"
+            else
+                progressive="${progressive}/${part}"
+            fi
+            if ! run_sftp_batch "$hostkey_opts" "ls ${progressive}"$'\nbye'; then
+                if ! run_sftp_batch "$hostkey_opts" "mkdir ${progressive}"$'\nbye'; then
+                    log_error "Failed to create remote directory (home-relative): ${progressive}"
+                    if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
+                    return 1
+                fi
+                log "Created remote directory: ${progressive}"
+            fi
+        done
+        # Update SFTP_REMOTE_DIR to relative for subsequent upload
+        SFTP_REMOTE_DIR="$rel"
+    fi
+
+    # Final confirmation
+    if run_sftp_batch "$hostkey_opts" "ls ${SFTP_REMOTE_DIR}"$'\nbye'; then
+        log "Remote directory ready: ${SFTP_REMOTE_DIR}"
+        if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
+        return 0
+    else
+        log_error "Remote directory validation failed: ${SFTP_REMOTE_DIR}"
+        if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
+        return 1
+    fi
 }
 
 # CSV format settings (as per specification)
@@ -348,47 +500,67 @@ upload_to_sftp() {
         return 1
     fi
 
-    # Create SFTP batch commands
-    local sftp_batch=$(mktemp)
-    cat > "$sftp_batch" <<EOF
+    # Create SFTP batch content (via stdin)
+    local sftp_batch_content
+    sftp_batch_content=$(cat <<EOF
 cd $SFTP_REMOTE_DIR
 put $local_file $remote_temp
 rename $remote_temp $remote_filename
 bye
 EOF
+)
     
     # Execute SFTP commands
-    local sftp_cmd="sftp${hostkey_opts}"
-    sftp_cmd+=" -P ${SFTP_PORT}"
-    sftp_cmd+=" -b ${sftp_batch}"
-    
-    if [[ -n "$SFTP_KEY_FILE" ]]; then
-        sftp_cmd+=" -i ${SFTP_KEY_FILE}"
+    # Convert host key opts string to array
+    local extra_opts=()
+    if [[ -n "$hostkey_opts" ]]; then
+        # shellcheck disable=SC2206
+        extra_opts=($hostkey_opts)
     fi
-    
-    sftp_cmd+=" ${SFTP_USER}@${SFTP_HOST}"
-    
-    # Execute with password if provided and no key file
-    if [[ -n "$SFTP_PASSWORD" ]] && [[ -z "$SFTP_KEY_FILE" ]]; then
-        if ! command -v sshpass &> /dev/null; then
+
+    local cmd=( sftp )
+    cmd+=( "${extra_opts[@]}" )
+    if [[ -n "$SFTP_PASSWORD" && -z "$SFTP_KEY_FILE" ]]; then
+        cmd+=( -o PreferredAuthentications=password -o PubkeyAuthentication=no -o BatchMode=no -o NumberOfPasswordPrompts=1 )
+    fi
+    cmd+=( -P "${SFTP_PORT}" -b - )
+    if [[ -n "$SFTP_KEY_FILE" ]]; then
+        cmd+=( -i "${SFTP_KEY_FILE}" )
+    fi
+    cmd+=( "${SFTP_USER}@${SFTP_HOST}" )
+
+    if [[ "${DEBUG_SFTP:-false}" == "true" ]]; then
+        {
+            printf "[debug] sftp cmd: ";
+            printf "%q " "${cmd[@]}";
+            printf "\n";
+        } | tee -a "$LOG_FILE" >/dev/null
+    fi
+
+    local out
+    local status=0
+    if [[ -n "$SFTP_PASSWORD" && -z "$SFTP_KEY_FILE" ]]; then
+        if command -v sshpass >/dev/null 2>&1; then
+            out=$(SSHPASS="$SFTP_PASSWORD" sshpass -e "${cmd[@]}" <<< "$sftp_batch_content" 2>&1) || status=$?
+        else
             log_error "sshpass is required for password authentication but not installed"
-            rm -f "$sftp_batch"
             return 1
         fi
-        # Use SSHPASS environment variable to avoid password in process list
-        export SSHPASS="$SFTP_PASSWORD"
-        sftp_cmd="sshpass -e ${sftp_cmd}"
+    else
+        out=$("${cmd[@]}" <<< "$sftp_batch_content" 2>&1) || status=$?
     fi
-    
-    if eval "$sftp_cmd"; then
+
+    if [[ -n "$out" ]]; then
+        echo "$out" | sed 's/^/[sftp] /' | tee -a "$LOG_FILE" >/dev/null
+    fi
+
+    if [[ $status -eq 0 ]]; then
         log "Successfully uploaded: $remote_final"
-        rm -f "$sftp_batch"
         if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
         unset SSHPASS
         return 0
     else
         log_error "Failed to upload file to SFTP"
-        rm -f "$sftp_batch"
         if [[ -n "${SFTP_KNOWN_HOSTS_TEMP:-}" ]]; then rm -f "${SFTP_KNOWN_HOSTS_TEMP}" || true; fi
         unset SSHPASS
         return 1
@@ -503,6 +675,12 @@ main() {
 
     # Ensure sshpass is available if password authentication is used for SFTP
     if ! ensure_sshpass_if_needed; then
+        exit 1
+    fi
+
+    # Test SFTP connection and ensure remote directory exists (create if missing)
+    if ! ensure_sftp_connection_and_remote_dir; then
+        log_error "SFTP connection or remote directory setup failed"
         exit 1
     fi
 
