@@ -57,6 +57,7 @@ SFTP_KEY_FILE="${SFTP_KEY_FILE:-}"
 LOG_FILE="${LOG_FILE:-/tmp/mysql_to_sftp.log}"
 SFTP_DISABLE_HOST_KEY_CHECKING="${SFTP_DISABLE_HOST_KEY_CHECKING:-false}"
 SFTP_KNOWN_HOSTS="${SFTP_KNOWN_HOSTS:-}"
+CSV_INCLUDE_HEADERS="${CSV_INCLUDE_HEADERS:-true}"
 
 # Ensure sshpass is available when using password authentication for SFTP
 ensure_sshpass_if_needed() {
@@ -415,6 +416,96 @@ LINES TERMINATED BY '$CSV_LINE_TERMINATOR'
 EOF
 }
 
+# Generate a CSV header line for a given SELECT query.
+# Prints the header line (quoted CSV) to stdout and returns 0 on success.
+# Returns 1 if headers cannot be derived.
+generate_csv_header_line() {
+    local sql_query="$1"
+
+    # Heuristic: if the query already contains LIMIT, wrap as a derived table and LIMIT 0.
+    # Otherwise, append LIMIT 0 at the end.
+    local header_query=""
+    if echo "$sql_query" | grep -qiE '(^|[[:space:]])limit[[:space:]]+[0-9]'; then
+        header_query="SELECT * FROM ( ${sql_query} ) AS __t LIMIT 0"
+    else
+        header_query="${sql_query} LIMIT 0"
+    fi
+
+    local tsv_header
+    local mysql_cmd=( mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" --batch --raw --column-names "${MYSQL_DATABASE}" )
+    # Use a temporary defaults file if password is provided to avoid exposing it
+    local tmp_defaults=""
+    if [[ -n "${MYSQL_PASSWORD}" ]]; then
+        tmp_defaults=$(mktemp)
+        printf "[client]\npassword=%s\n" "${MYSQL_PASSWORD}" > "${tmp_defaults}"
+        mysql_cmd=( mysql --defaults-extra-file="${tmp_defaults}" -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" --batch --raw --column-names "${MYSQL_DATABASE}" )
+    fi
+
+    # Execute the query and capture only the header line (first line)
+    # Capture the first non-empty line of output as the header
+    if ! tsv_header=$("${mysql_cmd[@]}" -e "SET NAMES utf8mb4; ${header_query}" 2>/dev/null | awk 'NF{print; exit}'); then
+        [[ -n "${tmp_defaults}" ]] && rm -f "${tmp_defaults}"
+        return 1
+    fi
+    [[ -n "${tmp_defaults}" ]] && rm -f "${tmp_defaults}"
+
+    if [[ -n "${tsv_header}" ]]; then
+        # Convert tab-separated header to quoted CSV, escaping double quotes by doubling them
+        echo -n "${tsv_header}" | awk -v dq='"' 'BEGIN{FS="\t"} {
+            for (i=1; i<=NF; i++) { gsub(dq, dq dq, $i) }
+            for (i=1; i<=NF; i++) { printf "%s%s%s", dq, $i, dq; if (i<NF) printf "," }
+            printf "\n"
+        }'
+        return 0
+    fi
+
+    # Fallback: derive headers from the SELECT list heuristically
+    local select_part
+    # Normalize whitespace to single spaces
+    select_part=$(echo "$sql_query" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+    # Extract text between SELECT and FROM (first FROM)
+    select_part=$(echo "$select_part" | sed -E 's/^.*[Ss][Ee][Ll][Ee][Cc][Tt][[:space:]]+//; s/[[:space:]]+[Ff][Rr][Oo][Mm].*$//')
+    if [[ -z "$select_part" ]]; then
+        return 1
+    fi
+    # Split by commas (naive; suitable for simple select lists) and build CSV header
+    echo "$select_part" | awk -v dq='"' '
+        BEGIN{FS=","}
+        {
+            for (i=1; i<=NF; i++) {
+                f=$i
+                gsub(/^ +| +$/, "", f)
+                # Lowercase copy for matching AS
+                fl=f; gsub(/\`/,"",fl)
+                # Extract alias after AS or last token
+                header=f
+                # Try AS alias
+                if (match(fl, /[[:space:]]+[Aa][Ss][[:space:]]+([^ ]+)$/, m)) {
+                    header = m[1]
+                } else {
+                    # Try last space separated token (alias without AS)
+                    n=split(fl, parts, /[[:space:]]+/)
+                    if (n>1) { header = parts[n] }
+                }
+                # If still contains dot, take the part after last dot
+                gsub(/\`/ , "", header)
+                if (match(header, /\./)) {
+                    n=split(header, p, /\./); header=p[n]
+                }
+                # Strip double quotes/backticks
+                gsub(/^"|"$/, "", header)
+                gsub(/\`/, "", header)
+                # CSV quote and escape
+                gsub(/"/, "\"\"", header)
+                printf "%s%s%s", dq, header, dq
+                if (i<NF) printf ","
+            }
+            printf "\n"
+        }
+    '
+    return 0
+}
+
 # Function to execute MySQL query with INTO OUTFILE
 execute_query() {
     local sql_query="$1"
@@ -613,19 +704,19 @@ process_sql_file() {
         return 1
     fi
 
-    # Prepare a readable copy if the generated file is not readable by the current user (e.g., owned by mysql in 750 dir)
-    local upload_source="$output_file"
+    # Prepare a readable data copy if needed
+    local data_source="$output_file"
     if [[ ! -r "$output_file" ]]; then
-        local tmp_copy
-        tmp_copy="/tmp/${csv_filename}"
+        local tmp_data_copy
+        tmp_data_copy="/tmp/${basename}_data.csv"
         if command -v sudo >/dev/null 2>&1; then
-            if sudo -n cp "$output_file" "$tmp_copy" 2>/dev/null; then
-                sudo -n chown "$(id -u)":"$(id -g)" "$tmp_copy" 2>/dev/null || true
-                sudo -n chmod 640 "$tmp_copy" 2>/dev/null || true
-                upload_source="$tmp_copy"
-                log "Created readable copy for upload: $tmp_copy"
+            if sudo -n cp "$output_file" "$tmp_data_copy" 2>/dev/null; then
+                sudo -n chown "$(id -u)":"$(id -g)" "$tmp_data_copy" 2>/dev/null || true
+                sudo -n chmod 640 "$tmp_data_copy" 2>/dev/null || true
+                data_source="$tmp_data_copy"
+                log "Created readable data copy: $tmp_data_copy"
             else
-                log_error "Could not create readable copy of $output_file for upload"
+                log_error "Could not create readable copy of $output_file"
                 return 1
             fi
         else
@@ -633,11 +724,37 @@ process_sql_file() {
             return 1
         fi
     fi
+
+    # Optionally prepend CSV header row
+    local upload_source="$data_source"
+    if [[ "${CSV_INCLUDE_HEADERS}" == "true" ]]; then
+        log "Generating CSV header row for: ${csv_filename}"
+        local header_line
+        if header_line=$(generate_csv_header_line "$query"); then
+            local tmp_with_header="/tmp/${basename}_with_header.csv"
+            printf "%s\n" "$header_line" > "$tmp_with_header"
+            cat "$data_source" >> "$tmp_with_header"
+            upload_source="$tmp_with_header"
+            log "Header row added to temporary file: $tmp_with_header"
+        else
+            log "Could not derive header row; proceeding without headers for: ${csv_filename}"
+        fi
+    fi
     
     # Upload to SFTP
     if ! upload_to_sftp "$upload_source" "$csv_filename"; then
         log_error "Failed to upload CSV for: $sql_file"
         return 1
+    fi
+
+    # Cleanup temporary files created for upload
+    if [[ "$upload_source" == /tmp/* ]]; then
+        rm -f "$upload_source" 2>/dev/null || true
+        log "Removed temporary upload file: $upload_source"
+    fi
+    if [[ "$data_source" == /tmp/* && "$data_source" != "$upload_source" ]]; then
+        rm -f "$data_source" 2>/dev/null || true
+        log "Removed temporary data file: $data_source"
     fi
     
     # Clean up local CSV file (optional)
