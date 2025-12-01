@@ -1,14 +1,16 @@
 # MySQL to SFTP Extraction
 
-A bash script that executes SQL queries from `.sql` files, generates CSV files using MySQL's `INTO OUTFILE`, and uploads them to an SFTP server using atomic operations.
+A bash script that executes SQL queries from `.sql` files on a MySQL server (local or remote), generates CSV files locally, and uploads them to an SFTP server using atomic operations.
 
 ## Features
 
-- ✅ Executes SQL queries from `.sql` files on MySQL server
-- ✅ Generates CSV files directly on MySQL server using `SELECT ... INTO OUTFILE`
+- ✅ Executes SQL queries from `.sql` files on local or remote MySQL server
+- ✅ Generates CSV files locally (no FILE privilege required on remote MySQL)
+- ✅ Works with remote MySQL servers without filesystem access
 - ✅ Atomic SFTP upload (upload as `.part` then rename)
 - ✅ UTF-8 encoding support
 - ✅ Configurable CSV format
+- ✅ CSV headers included automatically
 - ✅ Comprehensive logging
 - ✅ Error handling
 - ✅ No Python or additional dependencies required (bash + mysql client + sftp only)
@@ -22,12 +24,9 @@ A bash script that executes SQL queries from `.sql` files, generates CSV files u
 - Optional: `sshpass` (for SFTP password authentication)
 
 ### MySQL Requirements
-- MySQL user with `FILE` privilege
-- `secure_file_priv` configured (typically `/var/lib/mysql-files/`)
-- The directory specified in `secure_file_priv` must:
-  - Exist
-  - Be writable by the MySQL server process
-  - Be readable by the user running the script
+- MySQL user with SELECT privilege on the target database
+- No FILE privilege required (CSV generation is done locally)
+- Works with local or remote MySQL servers
 
 ### SFTP Requirements
 - Valid SFTP credentials (password or SSH key)
@@ -113,10 +112,10 @@ The script can be configured using environment variables. You can:
 #### Optional Variables
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+|----------|-------------|---------||
 | `SQL_DIR` | Directory containing .sql files | `sql/queries` |
-| `OUTPUT_DIR` | MySQL output directory (secure_file_priv) | `/var/lib/mysql-files` |
-| `MYSQL_HOST` | MySQL server hostname | `localhost` |
+| `OUTPUT_DIR` | Local directory for CSV generation | `/tmp/mysql_exports` |
+| `MYSQL_HOST` | MySQL server hostname (local or remote) | `localhost` |
 | `MYSQL_PORT` | MySQL server port | `3306` |
 | `MYSQL_PASSWORD` | MySQL password | (empty) |
 | `SFTP_PORT` | SFTP server port | `22` |
@@ -126,44 +125,38 @@ The script can be configured using environment variables. You can:
 
 ### MySQL Configuration
 
-#### Check secure_file_priv Setting
+#### Remote MySQL Server
+
+Pour se connecter à un serveur MySQL distant, configurez simplement les variables `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, et `MYSQL_PASSWORD` dans votre fichier `.env`.
+
+#### Grant SELECT Privilege
 
 ```sql
-SHOW VARIABLES LIKE 'secure_file_priv';
-```
-
-This will show the directory where MySQL can write files. Update your `OUTPUT_DIR` environment variable to match this path.
-
-#### Grant FILE Privilege
-
-```sql
-GRANT FILE ON *.* TO 'your_mysql_user'@'localhost';
+GRANT SELECT ON your_database.* TO 'your_mysql_user'@'%';
 FLUSH PRIVILEGES;
 ```
 
-#### Verify Directory Permissions
+#### Local Output Directory
+
+Le répertoire de sortie local (`OUTPUT_DIR`) sera créé automatiquement s'il n'existe pas. Assurez-vous que l'utilisateur exécutant le script a les permissions d'écriture.
 
 ```bash
-# The directory must exist and be writable by MySQL
-sudo mkdir -p /var/lib/mysql-files
-sudo chown mysql:mysql /var/lib/mysql-files
-sudo chmod 755 /var/lib/mysql-files
+# Créer le répertoire si nécessaire
+mkdir -p /tmp/mysql_exports
+chmod 755 /tmp/mysql_exports
 ```
 
 ### CSV Format
 
-The script generates CSV files with the following format (as per specification):
+The script generates CSV files with the following format:
 - **Field Terminator**: `,` (comma)
-- **Field Enclosure**: `"` (double quote, optional)
-- **Escape Character**: `"` (double quote)
+- **Field Enclosure**: `"` (double quote)
+- **Escape Character**: `"` (double quote - doubled for escaping)
 - **Line Terminator**: `\n` (newline)
 - **Encoding**: UTF-8 (utf8mb4)
+- **Headers**: Included automatically with column names
 
-#### CSV Headers
-
-- When `CSV_INCLUDE_HEADERS=true` (default), the script ajoute une première ligne d'en-tête avec les noms de colonnes.
-- Les noms de colonnes sont dérivés en exécutant votre requête avec `LIMIT 0` (ou en l'encapsulant si elle contient déjà un `LIMIT`) pour obtenir les métadonnées, puis convertis en CSV avec guillemets et échappement.
-- Cela fonctionne pour les requêtes `SELECT` simples comme dans `sql/queries/`. Si une requête complexe empêche l'inférence (rare), le script continue sans en-têtes et journalise l'information.
+All fields are properly quoted and escaped according to RFC 4180 CSV standard.
 
 ## Usage
 
@@ -206,7 +199,7 @@ Place your SQL query files in the directory specified by `SQL_DIR` (default: `sq
 ### File Format
 
 - Each `.sql` file should contain a single `SELECT` query
-- Do **NOT** include `INTO OUTFILE` in your queries (the script adds it automatically)
+- Do **NOT** include `INTO OUTFILE` in your queries (not used anymore)
 - Trailing semicolons are optional (they will be removed if present)
 - UTF-8 encoding is recommended
 
@@ -243,9 +236,10 @@ ORDER BY o.order_date DESC
 2. **Processing**: For each `.sql` file:
    - Reads and cleans the query (removes trailing semicolons)
    - Verifies the query doesn't already contain `INTO OUTFILE`
-   - Adds the `INTO OUTFILE` clause with the specified CSV format
-   - Executes the query on MySQL with UTF-8 encoding (`SET NAMES utf8mb4`)
-   - Generates a CSV file in the `OUTPUT_DIR` directory
+   - Executes the query on MySQL (local or remote) with UTF-8 encoding (`SET NAMES utf8mb4`)
+   - Retrieves the data and generates a CSV file locally in the `OUTPUT_DIR` directory
+   - Includes column headers in the first row
+   - Properly escapes and quotes all fields
 3. **Upload**: For each generated CSV file:
    - Uploads to SFTP as `filename.csv.part`
    - Renames to `filename.csv` (atomic operation)
@@ -297,20 +291,20 @@ The script uses atomic uploads to prevent incomplete files on the SFTP server:
 
 ## Troubleshooting
 
-### MySQL: "The MySQL server is running with the --secure-file-priv option"
+### MySQL: "Access denied for user"
 
-**Solution**: Set `OUTPUT_DIR` to match MySQL's `secure_file_priv` value:
-```bash
-mysql -e "SHOW VARIABLES LIKE 'secure_file_priv';"
-```
-
-### MySQL: "Access denied; you need (at least one of) the FILE privilege(s)"
-
-**Solution**: Grant FILE privilege to your MySQL user:
+**Solution**: Verify your MySQL credentials and ensure the user has SELECT privilege:
 ```sql
-GRANT FILE ON *.* TO 'your_user'@'localhost';
+GRANT SELECT ON your_database.* TO 'your_user'@'%';
 FLUSH PRIVILEGES;
 ```
+
+### Cannot connect to remote MySQL server
+
+**Solution**: Check:
+1. MySQL server accepts remote connections (bind-address in my.cnf)
+2. Firewall rules allow connection on port 3306
+3. User has remote access permission (not just @localhost)
 
 ### SFTP: "Permission denied"
 
@@ -330,9 +324,9 @@ export SFTP_KEY_FILE=/path/to/your/key
 ### No CSV files generated
 
 **Solution**: Check:
-1. MySQL has FILE privilege
-2. `secure_file_priv` is configured correctly
-3. Output directory exists and is writable by MySQL
+1. MySQL user has SELECT privilege on the database
+2. Local output directory exists and is writable
+3. Query executes successfully in MySQL
 4. Log file for specific error messages
 
 ## Examples
@@ -347,14 +341,14 @@ export SFTP_KEY_FILE=/path/to/your/key
 ### Testing Individual Components
 
 ```bash
-# Test MySQL connection
+# Test MySQL connection (local or remote)
 mysql -h$MYSQL_HOST -P$MYSQL_PORT -u$MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE -e "SELECT 1"
 
 # Test SFTP connection
 sftp -P $SFTP_PORT $SFTP_USER@$SFTP_HOST
 
-# Check secure_file_priv
-mysql -h$MYSQL_HOST -P$MYSQL_PORT -u$MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW VARIABLES LIKE 'secure_file_priv';"
+# Test a simple query
+mysql -h$MYSQL_HOST -P$MYSQL_PORT -u$MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE -e "SELECT * FROM your_table LIMIT 5"
 ```
 
 ## License
