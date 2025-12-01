@@ -127,7 +127,7 @@ The script can be configured using environment variables. You can:
 
 #### Remote MySQL Server
 
-Pour se connecter à un serveur MySQL distant, configurez simplement les variables `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, et `MYSQL_PASSWORD` dans votre fichier `.env`.
+To connect to a remote MySQL server, simply configure the `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, and `MYSQL_PASSWORD` variables in your `.env` file.
 
 #### Grant SELECT Privilege
 
@@ -138,10 +138,10 @@ FLUSH PRIVILEGES;
 
 #### Local Output Directory
 
-Le répertoire de sortie local (`OUTPUT_DIR`) sera créé automatiquement s'il n'existe pas. Assurez-vous que l'utilisateur exécutant le script a les permissions d'écriture.
+The local output directory (`OUTPUT_DIR`) will be created automatically if it doesn't exist. Make sure the user running the script has write permissions.
 
 ```bash
-# Créer le répertoire si nécessaire
+# Create the directory if needed
 mkdir -p /tmp/mysql_exports
 chmod 755 /tmp/mysql_exports
 ```
