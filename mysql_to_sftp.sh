@@ -415,66 +415,83 @@ LINES TERMINATED BY '$CSV_LINE_TERMINATOR'
 EOF
 }
 
-# Function to execute MySQL query with INTO OUTFILE
+# Function to execute MySQL query and generate CSV locally
 execute_query() {
     local sql_query="$1"
     local output_file="$2"
     
-    # Proactively remove the output file (MySQL won't overwrite). Don't rely on -f, directory may not be listable.
+    # Remove any existing output file
     log "Ensuring no pre-existing output file: $output_file"
     rm -f "$output_file" 2>/dev/null || true
-    if command -v sudo >/dev/null 2>&1; then
-        sudo -n rm -f "$output_file" 2>/dev/null || true
-    fi
-    
-    # Build the complete SQL statement
-    local into_clause
-    into_clause=$(build_into_outfile_clause "$output_file")
-    
-    local complete_query="${sql_query}
-${into_clause};"
     
     log "Executing query to generate: $output_file"
     
-    # Execute with optional defaults file to avoid exposing password
-    local full_query="SET NAMES utf8mb4; ${complete_query}"
+    # Execute query and generate CSV locally using mysql client
+    # Use tab-separated output and convert to CSV with proper quoting
     local mysql_status=1
+    
     if [[ -n "$MYSQL_PASSWORD" ]]; then
         local tmp_defaults
         tmp_defaults=$(mktemp)
         printf "[client]\npassword=%s\n" "$MYSQL_PASSWORD" > "$tmp_defaults"
-        if mysql --defaults-extra-file="$tmp_defaults" -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" -e "$full_query"; then
+        
+        # Execute query and generate CSV with headers
+        if mysql --defaults-extra-file="$tmp_defaults" \
+            -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
+            --batch --raw --skip-column-names \
+            -e "SET NAMES utf8mb4; ${sql_query}" | \
+            awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
+            BEGIN {
+                # Get headers first
+                system("mysql --defaults-extra-file='"$tmp_defaults"' -h'"${MYSQL_HOST}"' -P'"${MYSQL_PORT}"' -u'"${MYSQL_USER}"' '"${MYSQL_DATABASE}"' --batch --skip-pager -e \"SET NAMES utf8mb4; ${sql_query}\" | head -1 | awk -v OFS=\"${CSV_FIELD_TERMINATOR}\" -v QUOTE=\"${CSV_FIELD_ENCLOSURE}\" '\''BEGIN{FS=\"\\t\"}{for(i=1;i<=NF;i++){gsub(QUOTE,QUOTE QUOTE,$i);printf \"%s%s%s\",QUOTE,$i,QUOTE; if(i<NF)printf OFS}print \"\"}'\''")
+            }
+            {
+                FS="\t"
+                for(i=1; i<=NF; i++) {
+                    # Escape quotes by doubling them
+                    gsub(QUOTE, QUOTE QUOTE, $i)
+                    # Print field with quotes
+                    printf "%s%s%s", QUOTE, $i, QUOTE
+                    if(i < NF) printf OFS
+                }
+                print ""
+            }' > "$output_file"; then
             mysql_status=0
         fi
         rm -f "$tmp_defaults"
     else
-        if mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" -e "$full_query"; then
+        # Execute query and generate CSV with headers
+        if mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
+            --batch --raw --skip-column-names \
+            -e "SET NAMES utf8mb4; ${sql_query}" | \
+            awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
+            BEGIN {
+                # Get headers first
+                system("mysql -h'"${MYSQL_HOST}"' -P'"${MYSQL_PORT}"' -u'"${MYSQL_USER}"' '"${MYSQL_DATABASE}"' --batch --skip-pager -e \"SET NAMES utf8mb4; ${sql_query}\" | head -1 | awk -v OFS=\"${CSV_FIELD_TERMINATOR}\" -v QUOTE=\"${CSV_FIELD_ENCLOSURE}\" '\''BEGIN{FS=\"\\t\"}{for(i=1;i<=NF;i++){gsub(QUOTE,QUOTE QUOTE,$i);printf \"%s%s%s\",QUOTE,$i,QUOTE; if(i<NF)printf OFS}print \"\"}'\''")
+            }
+            {
+                FS="\t"
+                for(i=1; i<=NF; i++) {
+                    # Escape quotes by doubling them
+                    gsub(QUOTE, QUOTE QUOTE, $i)
+                    # Print field with quotes
+                    printf "%s%s%s", QUOTE, $i, QUOTE
+                    if(i < NF) printf OFS
+                }
+                print ""
+            }' > "$output_file"; then
             mysql_status=0
         fi
     fi
+    
     if [[ $mysql_status -ne 0 ]]; then
         log_error "Failed to execute query"
         return 1
     fi
 
-    # Verify the output file was created (best-effort): try direct test, then sudo test; otherwise trust MySQL success
-    if [[ -f "$output_file" ]]; then
-        : # ok
-    elif command -v sudo >/dev/null 2>&1 && sudo -n test -f "$output_file" 2>/dev/null; then
-        : # ok (verified with sudo)
-    else
+    # Verify the output file was created
+    if [[ ! -f "$output_file" ]]; then
         log_error "Output file was not created: $output_file"
-        # Provide diagnostics to help troubleshoot permissions and secure_file_priv
-        local current_secure
-        current_secure=$(get_secure_file_priv || true)
-        log "Diagnostic - secure_file_priv: '${current_secure:-unknown}'"
-        if command -v ls >/dev/null 2>&1; then
-            if [[ -d "$(dirname "$output_file")" ]]; then
-                log "Diagnostic - directory listing of $(dirname "$output_file"):" 
-                ls -ld "$(dirname "$output_file")" | tee -a "$LOG_FILE" || true
-                ls -l "$(dirname "$output_file")" | head -n 20 | tee -a "$LOG_FILE" || true
-            fi
-        fi
         return 1
     fi
     
@@ -591,21 +608,6 @@ process_sql_file() {
         log_error "Query already contains INTO OUTFILE clause: $sql_file"
         return 1
     fi
-
-    # Pre-clean any existing output to avoid MySQL 'file exists' error; use sudo if required and do not rely on -f
-    log "Pre-clean: removing any existing output file: $output_file"
-    rm -f "$output_file" 2>/dev/null || true
-    if command -v sudo >/dev/null 2>&1; then
-        sudo -n rm -f "$output_file" 2>/dev/null || true
-    fi
-    # If still exists (cannot stat reliably without permissions, so attempt a safe rename target to avoid collision)
-    if [[ -e "$output_file" ]]; then
-        local ts
-        ts="$(date +%Y%m%d%H%M%S)"
-        local uniq_output_file="${OUTPUT_DIR}/${basename}_${ts}_$RANDOM.csv"
-        log "Using unique output file to avoid potential collision: $uniq_output_file"
-        output_file="$uniq_output_file"
-    fi
     
     # Execute query to generate CSV
     if ! execute_query "$query" "$output_file"; then
@@ -613,26 +615,8 @@ process_sql_file() {
         return 1
     fi
 
-    # Prepare a readable copy if the generated file is not readable by the current user (e.g., owned by mysql in 750 dir)
+    # File is generated locally, so no need for special copy handling
     local upload_source="$output_file"
-    if [[ ! -r "$output_file" ]]; then
-        local tmp_copy
-        tmp_copy="/tmp/${csv_filename}"
-        if command -v sudo >/dev/null 2>&1; then
-            if sudo -n cp "$output_file" "$tmp_copy" 2>/dev/null; then
-                sudo -n chown "$(id -u)":"$(id -g)" "$tmp_copy" 2>/dev/null || true
-                sudo -n chmod 640 "$tmp_copy" 2>/dev/null || true
-                upload_source="$tmp_copy"
-                log "Created readable copy for upload: $tmp_copy"
-            else
-                log_error "Could not create readable copy of $output_file for upload"
-                return 1
-            fi
-        else
-            log_error "Output file is not readable and sudo is not available: $output_file"
-            return 1
-        fi
-    fi
     
     # Upload to SFTP
     if ! upload_to_sftp "$upload_source" "$csv_filename"; then
@@ -658,20 +642,11 @@ main() {
         exit 1
     fi
     
-    # Align OUTPUT_DIR with MySQL secure_file_priv if set
-    local secure_dir
-    secure_dir=$(get_secure_file_priv || true)
-    if [[ -n "${secure_dir}" ]]; then
-        if [[ "${OUTPUT_DIR}" != "${secure_dir}" ]]; then
-            log "secure_file_priv is '${secure_dir}', overriding OUTPUT_DIR='${OUTPUT_DIR}' to match"
-            OUTPUT_DIR="${secure_dir}"
-        fi
-    else
-        log "secure_file_priv not reported or unrestricted; using OUTPUT_DIR='${OUTPUT_DIR}'"
+    # Ensure the OUTPUT_DIR exists for local CSV generation
+    if [[ ! -d "${OUTPUT_DIR}" ]]; then
+        log "Creating local output directory: ${OUTPUT_DIR}"
+        mkdir -p "${OUTPUT_DIR}"
     fi
-
-    # Ensure the OUTPUT_DIR exists and is writable by MySQL (may require sudo)
-    ensure_output_dir_permissions "${OUTPUT_DIR}"
 
     # Ensure sshpass is available if password authentication is used for SFTP
     if ! ensure_sshpass_if_needed; then
