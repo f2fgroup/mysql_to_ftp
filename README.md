@@ -122,6 +122,7 @@ The script can be configured using environment variables. You can:
 | `SFTP_PORT` | SFTP server port | `22` |
 | `SFTP_REMOTE_DIR` | Remote directory on SFTP server | `/upload` |
 | `LOG_FILE` | Path to log file | `/tmp/mysql_to_sftp.log` |
+| `CSV_INCLUDE_HEADERS` | Prepend a header row with column names | `true` |
 
 ### MySQL Configuration
 
@@ -157,6 +158,12 @@ The script generates CSV files with the following format (as per specification):
 - **Escape Character**: `"` (double quote)
 - **Line Terminator**: `\n` (newline)
 - **Encoding**: UTF-8 (utf8mb4)
+
+#### CSV Headers
+
+- When `CSV_INCLUDE_HEADERS=true` (default), the script ajoute une première ligne d'en-tête avec les noms de colonnes.
+- Les noms de colonnes sont dérivés en exécutant votre requête avec `LIMIT 0` (ou en l'encapsulant si elle contient déjà un `LIMIT`) pour obtenir les métadonnées, puis convertis en CSV avec guillemets et échappement.
+- Cela fonctionne pour les requêtes `SELECT` simples comme dans `sql/queries/`. Si une requête complexe empêche l'inférence (rare), le script continue sans en-têtes et journalise l'information.
 
 ## Usage
 
