@@ -121,7 +121,6 @@ The script can be configured using environment variables. You can:
 | `SFTP_PORT` | SFTP server port | `22` |
 | `SFTP_REMOTE_DIR` | Remote directory on SFTP server | `/upload` |
 | `LOG_FILE` | Path to log file | `/tmp/mysql_to_sftp.log` |
-| `CSV_INCLUDE_HEADERS` | Prepend a header row with column names | `true` |
 
 ### MySQL Configuration
 

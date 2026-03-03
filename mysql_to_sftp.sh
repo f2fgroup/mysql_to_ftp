@@ -429,22 +429,19 @@ execute_query() {
     # Execute query and generate CSV locally using mysql client
     # Use tab-separated output and convert to CSV with proper quoting
     local mysql_status=1
+    log "CSV headers enabled (always included)"
     
     if [[ -n "$MYSQL_PASSWORD" ]]; then
         local tmp_defaults
         tmp_defaults=$(mktemp)
         printf "[client]\npassword=%s\n" "$MYSQL_PASSWORD" > "$tmp_defaults"
         
-        # Execute query and generate CSV with headers
+        # Execute query and generate CSV
         if mysql --defaults-extra-file="$tmp_defaults" \
             -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
-            --batch --raw --skip-column-names \
+            --batch --raw \
             -e "SET NAMES utf8mb4; ${sql_query}" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
-            BEGIN {
-                # Get headers first
-                system("mysql --defaults-extra-file='"$tmp_defaults"' -h'"${MYSQL_HOST}"' -P'"${MYSQL_PORT}"' -u'"${MYSQL_USER}"' '"${MYSQL_DATABASE}"' --batch --skip-pager -e \"SET NAMES utf8mb4; ${sql_query}\" | head -1 | awk -v OFS=\"${CSV_FIELD_TERMINATOR}\" -v QUOTE=\"${CSV_FIELD_ENCLOSURE}\" '\''BEGIN{FS=\"\\t\"}{for(i=1;i<=NF;i++){gsub(QUOTE,QUOTE QUOTE,$i);printf \"%s%s%s\",QUOTE,$i,QUOTE; if(i<NF)printf OFS}print \"\"}'\''")
-            }
             {
                 FS="\t"
                 for(i=1; i<=NF; i++) {
@@ -460,15 +457,11 @@ execute_query() {
         fi
         rm -f "$tmp_defaults"
     else
-        # Execute query and generate CSV with headers
+        # Execute query and generate CSV
         if mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
-            --batch --raw --skip-column-names \
+            --batch --raw \
             -e "SET NAMES utf8mb4; ${sql_query}" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
-            BEGIN {
-                # Get headers first
-                system("mysql -h'"${MYSQL_HOST}"' -P'"${MYSQL_PORT}"' -u'"${MYSQL_USER}"' '"${MYSQL_DATABASE}"' --batch --skip-pager -e \"SET NAMES utf8mb4; ${sql_query}\" | head -1 | awk -v OFS=\"${CSV_FIELD_TERMINATOR}\" -v QUOTE=\"${CSV_FIELD_ENCLOSURE}\" '\''BEGIN{FS=\"\\t\"}{for(i=1;i<=NF;i++){gsub(QUOTE,QUOTE QUOTE,$i);printf \"%s%s%s\",QUOTE,$i,QUOTE; if(i<NF)printf OFS}print \"\"}'\''")
-            }
             {
                 FS="\t"
                 for(i=1; i<=NF; i++) {
