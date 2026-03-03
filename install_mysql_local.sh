@@ -26,15 +26,46 @@ err()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
 # --- small utils ---
 need_sudo() { [ "$(id -u)" -ne 0 ]; }
 
+SUDO=()
+
+init_sudo() {
+  if ! need_sudo; then
+    return 0
+  fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    err "This script requires root privileges. Please run as root or install sudo."
+    exit 1
+  fi
+
+  if sudo -n true >/dev/null 2>&1; then
+    SUDO=(sudo -n)
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    log "sudo password required. Please authenticate to continue..."
+    if sudo -v; then
+      SUDO=(sudo)
+      return 0
+    fi
+    err "sudo authentication failed."
+    exit 1
+  fi
+
+  err "sudo requires a password in this environment. Re-run in an interactive terminal or run as root."
+  exit 1
+}
+
 run_root() {
-  if need_sudo; then sudo -n bash -c "$1"; else bash -c "$1"; fi
+  if need_sudo; then "${SUDO[@]}" bash -c "$1"; else bash -c "$1"; fi
 }
 
 apt_install() {
   local pkgs=("$@")
   if need_sudo; then
-    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -y
-    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -yq "${pkgs[@]}"
+    "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get update -y
+    "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -yq "${pkgs[@]}"
   else
     DEBIAN_FRONTEND=noninteractive apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -yq "${pkgs[@]}"
@@ -45,14 +76,14 @@ start_mysql_service() {
   # Prefer systemctl only when systemd is actually running (not the case in many containers)
   if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')" = "systemd" ]; then
     if need_sudo; then
-      sudo -n systemctl enable --now mysql || sudo -n systemctl restart mysql
+      "${SUDO[@]}" systemctl enable --now mysql || "${SUDO[@]}" systemctl restart mysql
     else
       systemctl enable --now mysql || systemctl restart mysql
     fi
   else
     # Fallback to SysV-style service management (works well in Docker)
     if need_sudo; then
-      sudo -n service mysql start || sudo -n service mysql restart || sudo -n /etc/init.d/mysql start || true
+      "${SUDO[@]}" service mysql start || "${SUDO[@]}" service mysql restart || "${SUDO[@]}" /etc/init.d/mysql start || true
     else
       service mysql start || service mysql restart || /etc/init.d/mysql start || true
     fi
@@ -113,6 +144,8 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
   exit 1
 fi
 
+init_sudo
+
 log "Using config file: ${CONFIG_FILE}"
 # shellcheck disable=SC1090
 set -a; source "${CONFIG_FILE}"; set +a
@@ -160,7 +193,7 @@ EOF
 
 log "Writing MySQL config: ${LOCAL_CNF}"
 if need_sudo; then
-  sudo -n tee "${LOCAL_CNF}" >/dev/null <"${TMP_CNF}"
+  "${SUDO[@]}" tee "${LOCAL_CNF}" >/dev/null <"${TMP_CNF}"
 else
   cat "${TMP_CNF}" > "${LOCAL_CNF}"
 fi
@@ -189,7 +222,7 @@ log "Applying database and user configuration..."
 
 # On Ubuntu, root often authenticates via unix_socket. Run mysql as root user.
 if need_sudo; then
-  if ! echo "${SQL_SETUP}" | sudo -n mysql -uroot; then
+  if ! echo "${SQL_SETUP}" | "${SUDO[@]}" mysql -uroot; then
     err "Failed to apply MySQL configuration as root"; exit 1; fi
 else
   if ! echo "${SQL_SETUP}" | mysql -uroot; then
