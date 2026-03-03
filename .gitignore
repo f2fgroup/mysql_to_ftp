@@ -1,6 +1,7 @@
 # Environment and configuration files with credentials
 .env
 config.env
+sftp_known_hosts
 
 # Log files
 *.log
