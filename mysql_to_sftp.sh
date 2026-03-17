@@ -439,15 +439,14 @@ execute_query() {
         # Execute query and generate CSV
         if mysql --defaults-extra-file="$tmp_defaults" \
             -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
+            --default-character-set=utf8mb4 \
             --batch --raw \
-            -e "SET NAMES utf8mb4; ${sql_query}" | \
+            -e "${sql_query}" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
+            BEGIN { FS="\t" }
             {
-                FS="\t"
                 for(i=1; i<=NF; i++) {
-                    # Escape quotes by doubling them
                     gsub(QUOTE, QUOTE QUOTE, $i)
-                    # Print field with quotes
                     printf "%s%s%s", QUOTE, $i, QUOTE
                     if(i < NF) printf OFS
                 }
@@ -459,15 +458,14 @@ execute_query() {
     else
         # Execute query and generate CSV
         if mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
+            --default-character-set=utf8mb4 \
             --batch --raw \
-            -e "SET NAMES utf8mb4; ${sql_query}" | \
+            -e "${sql_query}" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
+            BEGIN { FS="\t" }
             {
-                FS="\t"
                 for(i=1; i<=NF; i++) {
-                    # Escape quotes by doubling them
                     gsub(QUOTE, QUOTE QUOTE, $i)
-                    # Print field with quotes
                     printf "%s%s%s", QUOTE, $i, QUOTE
                     if(i < NF) printf OFS
                 }
@@ -482,9 +480,14 @@ execute_query() {
         return 1
     fi
 
-    # Verify the output file was created
+    # Verify the output file was created and is non-empty
     if [[ ! -f "$output_file" ]]; then
         log_error "Output file was not created: $output_file"
+        return 1
+    fi
+
+    if [[ ! -s "$output_file" ]]; then
+        log_error "Output file is empty (query produced no output): $output_file"
         return 1
     fi
     
