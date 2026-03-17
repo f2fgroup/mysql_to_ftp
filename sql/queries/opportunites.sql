@@ -1,0 +1,23 @@
+SELECT 
+id_eteko AS id,
+origine_du_lead,
+type_d_intervention,
+titre,
+id_client,
+nom_du_client,
+statut_de_l_opportunite,
+isfranchiseur,
+commentaire,
+date_de_creation,
+date_de_prochain_rappel,
+adresse_intervention,
+id_id_user AS id_attribue_a,
+id_user AS attribue_a,
+contact_de_l_intervention,
+date_de_rdv_technique,
+delai_transformation_statut_gagne,
+raison_sociale,
+type_de_client,
+id_client,
+prescripteur
+FROM BI_opportunite
