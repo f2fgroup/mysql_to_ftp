@@ -440,12 +440,17 @@ execute_query() {
         if mysql --defaults-extra-file="$tmp_defaults" \
             -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
             --default-character-set=utf8mb4 \
-            --batch --raw \
+            --batch \
             -e "${sql_query}" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
             BEGIN { FS="\t" }
             {
                 for(i=1; i<=NF; i++) {
+                    gsub(/\\\\/, "\001", $i)
+                    gsub(/\\n/, "\n", $i)
+                    gsub(/\\r/, "\r", $i)
+                    gsub(/\\t/, "\t", $i)
+                    gsub("\001", "\\", $i)
                     gsub(QUOTE, QUOTE QUOTE, $i)
                     printf "%s%s%s", QUOTE, $i, QUOTE
                     if(i < NF) printf OFS
@@ -459,12 +464,17 @@ execute_query() {
         # Execute query and generate CSV
         if mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
             --default-character-set=utf8mb4 \
-            --batch --raw \
+            --batch \
             -e "${sql_query}" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" '
             BEGIN { FS="\t" }
             {
                 for(i=1; i<=NF; i++) {
+                    gsub(/\\\\/, "\001", $i)
+                    gsub(/\\n/, "\n", $i)
+                    gsub(/\\r/, "\r", $i)
+                    gsub(/\\t/, "\t", $i)
+                    gsub("\001", "\\", $i)
                     gsub(QUOTE, QUOTE QUOTE, $i)
                     printf "%s%s%s", QUOTE, $i, QUOTE
                     if(i < NF) printf OFS
