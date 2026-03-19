@@ -66,9 +66,22 @@ SFTP_USER="${SFTP_USER:-}"
 SFTP_PASSWORD="${SFTP_PASSWORD:-}"
 SFTP_REMOTE_DIR="${SFTP_REMOTE_DIR:-/upload}"
 SFTP_KEY_FILE="${SFTP_KEY_FILE:-}"
-LOG_FILE="${LOG_FILE:-/tmp/mysql_to_sftp.log}"
+LOG_DIR="${LOG_DIR:-/tmp/mysql_to_sftp_logs}"
+# If LOG_FILE is not explicitly set, generate a timestamped log file per execution
+if [[ -z "${LOG_FILE:-}" ]]; then
+    _LOG_RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
+    LOG_FILE="${LOG_DIR}/mysql_to_sftp_${_LOG_RUN_TIMESTAMP}.log"
+fi
+# Ensure the log directory exists
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 SFTP_DISABLE_HOST_KEY_CHECKING="${SFTP_DISABLE_HOST_KEY_CHECKING:-false}"
 SFTP_KNOWN_HOSTS="${SFTP_KNOWN_HOSTS:-}"
+# Default to true even when the variable is set but empty
+SFTP_UPLOAD_LOG="${SFTP_UPLOAD_LOG:-true}"
+[[ -z "${SFTP_UPLOAD_LOG}" ]] && SFTP_UPLOAD_LOG="true"
+# Default to uploads/logs when the variable is unset or empty
+SFTP_LOG_REMOTE_DIR="${SFTP_LOG_REMOTE_DIR:-uploads/logs}"
+[[ -z "${SFTP_LOG_REMOTE_DIR}" ]] && SFTP_LOG_REMOTE_DIR="uploads/logs"
 
 # CSV format settings
 CSV_FIELD_TERMINATOR=','
@@ -506,6 +519,33 @@ upload_to_sftp() {
     fi
 }
 
+# Upload the execution log file to the SFTP server (non-fatal on failure)
+upload_log_to_sftp() {
+    local hostkey_opts="$1"
+
+    [[ "${SFTP_UPLOAD_LOG}" != "true" ]] && return 0
+    [[ ! -f "${LOG_FILE}" ]] && return 0
+
+    local log_filename
+    log_filename="$(basename "${LOG_FILE}")"
+    local remote_temp="${log_filename}.part"
+
+    log "Uploading log file to SFTP: ${SFTP_LOG_REMOTE_DIR}/${log_filename}"
+
+    # Attempt to create the remote log directory (not fatal if it already exists)
+    run_sftp_batch "$hostkey_opts" "$(printf 'mkdir "%s"\nbye' "${SFTP_LOG_REMOTE_DIR}")" >/dev/null 2>&1 || true
+
+    local sftp_batch
+    sftp_batch="$(printf 'cd "%s"\nput "%s" "%s"\nrename "%s" "%s"\nbye\n' \
+        "${SFTP_LOG_REMOTE_DIR}" "${LOG_FILE}" "${remote_temp}" "${remote_temp}" "${log_filename}")"
+
+    if run_sftp_batch "$hostkey_opts" "$sftp_batch"; then
+        log "Log file uploaded successfully: ${SFTP_LOG_REMOTE_DIR}/${log_filename}"
+    else
+        log_error "Failed to upload log file to SFTP (non-fatal)"
+    fi
+}
+
 # Function to process a single SQL file
 process_sql_file() {
     local sql_file="$1"
@@ -612,6 +652,9 @@ main() {
     log "Total files: $total_files"
     log "Successful: $success_count"
     log "Errors: $error_count"
+    log "Log file: ${LOG_FILE}"
+
+    upload_log_to_sftp "$hostkey_opts"
 
     if [[ $error_count -gt 0 ]]; then
         exit 1
