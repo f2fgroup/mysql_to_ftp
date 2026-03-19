@@ -79,9 +79,9 @@ SFTP_KNOWN_HOSTS="${SFTP_KNOWN_HOSTS:-}"
 # Default to true even when the variable is set but empty
 SFTP_UPLOAD_LOG="${SFTP_UPLOAD_LOG:-true}"
 [[ -z "${SFTP_UPLOAD_LOG}" ]] && SFTP_UPLOAD_LOG="true"
-# Default to uploads/logs when the variable is unset or empty
-SFTP_LOG_REMOTE_DIR="${SFTP_LOG_REMOTE_DIR:-uploads/logs}"
-[[ -z "${SFTP_LOG_REMOTE_DIR}" ]] && SFTP_LOG_REMOTE_DIR="uploads/logs"
+# Default to upload/logs when the variable is unset or empty
+SFTP_LOG_REMOTE_DIR="${SFTP_LOG_REMOTE_DIR:-upload/logs}"
+[[ -z "${SFTP_LOG_REMOTE_DIR}" ]] && SFTP_LOG_REMOTE_DIR="upload/logs"
 
 # CSV format settings
 CSV_FIELD_TERMINATOR=','
