@@ -424,6 +424,8 @@ _AWK_CSV='
     {
         for(i=1; i<=NF; i++) {
             val = unescape($i)
+            gsub(/\r/, "", val)
+            gsub(/\n/, " ", val)
             gsub(QUOTE, QUOTE QUOTE, val)
             printf "%s%s%s", QUOTE, val, QUOTE
             if(i < NF) printf OFS
