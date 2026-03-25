@@ -28,3 +28,6 @@ Thumbs.db
 *.bak
 
 export/
+
+# Test fixtures
+sql/queries_test/
