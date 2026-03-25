@@ -416,8 +416,8 @@ check_into_outfile() {
 }
 
 # AWK script: decode MySQL --batch escape sequences and format fields as CSV.
-# Uses a single-pass unescape() function to correctly handle all MySQL escapes
-# including \\ without the need for a sentinel character.
+# MySQL 8 batch mode outputs NULL as the literal text "NULL" (not \N).
+# NULL fields are emitted as empty quoted fields ("").
 _AWK_CSV='
     function unescape(s,    r, i, c, nc) {
         r = ""; i = 1
@@ -441,20 +441,25 @@ _AWK_CSV='
     BEGIN { FS="\t" }
     {
         for(i=1; i<=NF; i++) {
-            val = unescape($i)
-            gsub(/\r/, "", val)
-            gsub(/\n/, " ", val)
-            gsub(QUOTE, QUOTE QUOTE, val)
-            printf "%s%s%s", QUOTE, val, QUOTE
-            if(i < NF) printf OFS
+            if (NR > 1 && $i == "NULL") {
+                printf "%s%s", QUOTE QUOTE, (i < NF ? OFS : "")
+            } else {
+                val = unescape($i)
+                gsub(/\r/, "", val)
+                gsub(/\n/, " ", val)
+                gsub(QUOTE, QUOTE QUOTE, val)
+                printf "%s%s%s%s", QUOTE, val, QUOTE, (i < NF ? OFS : "")
+            }
         }
         print ""
     }
 '
 
 # AWK script: convert MySQL --batch output to SQL INSERT statements.
-# NULL values (\N in batch mode) are preserved as SQL NULL.
-# Single quotes in values are escaped as '' (ANSI SQL).
+# MySQL 8 batch mode outputs NULL as the literal text "NULL" (not \N).
+# NULL fields are emitted as SQL NULL (unquoted).
+# NOTE: varchar columns storing the literal string "NULL" are indistinguishable
+# from SQL NULL in MySQL batch mode and will also be emitted as SQL NULL.
 _AWK_SQL='
     function unescape(s,    r, i, c, nc) {
         r = ""; i = 1
@@ -475,6 +480,7 @@ _AWK_SQL='
         }
         return r
     }
+    BEGIN { FS="\t" }
     NR==1 {
         for(i=1; i<=NF; i++) cols[i]=$i
         ncols=NF
@@ -489,7 +495,7 @@ _AWK_SQL='
         }
         printf ") VALUES ("
         for(i=1; i<=NF; i++) {
-            if($i == "\\N") {
+            if($i == "NULL") {
                 printf "NULL"
             } else {
                 val = unescape($i)
