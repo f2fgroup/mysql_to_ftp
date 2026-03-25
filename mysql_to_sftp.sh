@@ -14,8 +14,9 @@ set -euo pipefail
 # --- Config loading: support --config or auto-load .env/config.env ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE=""
+ONLY_FILES=""
 
-# Parse --config using index-based iteration to avoid consuming $@
+# Parse --config and --only using index-based iteration to avoid consuming $@
 _i=1
 while [[ $_i -le $# ]]; do
     _arg="${!_i}"
@@ -30,6 +31,17 @@ while [[ $_i -le $# ]]; do
                 exit 1
             fi
             CONFIG_FILE="${!_j}"
+            ;;
+        --only=*)
+            ONLY_FILES="${_arg#*=}"
+            ;;
+        --only)
+            _j=$(( _i + 1 ))
+            if [[ $_j -gt $# ]] || [[ -z "${!_j:-}" ]]; then
+                echo "Error: --only requires a non-empty value" >&2
+                exit 1
+            fi
+            ONLY_FILES="${!_j}"
             ;;
     esac
     _i=$(( _i + 1 ))
@@ -197,6 +209,7 @@ prepare_host_key_options() {
 run_sftp_batch() {
     local hostkey_opts="$1"
     local batch_content="$2"
+    local silent="${3:-false}"  # pass "true" to suppress sftp output from the log file
 
     # Reset IFS to default to prevent contamination from callers that modified it
     local IFS=$' \t\n'
@@ -239,7 +252,7 @@ run_sftp_batch() {
     else
         out=$("${cmd[@]}" <<< "$batch_content" 2>&1) || status=$?
     fi
-    if [[ -n "$out" ]]; then
+    if [[ -n "$out" ]] && [[ "$silent" != "true" ]]; then
         echo "$out" | sed 's/^/[sftp] /' | tee -a "$LOG_FILE" >/dev/null
     fi
     return $status
@@ -446,6 +459,8 @@ execute_query() {
     log "CSV headers enabled (always included)"
 
     local mysql_status=1
+    local tmp_mysql_stderr
+    tmp_mysql_stderr=$(mktemp)
 
     if [[ -n "$MYSQL_PASSWORD" ]]; then
         local tmp_defaults
@@ -457,7 +472,7 @@ execute_query() {
             -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
             --default-character-set=utf8mb4 \
             --batch \
-            -e "${sql_query}" | \
+            -e "${sql_query}" 2>"$tmp_mysql_stderr" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" \
                 "$_AWK_CSV" > "$output_file"; then
             mysql_status=0
@@ -469,7 +484,7 @@ execute_query() {
         if mysql -h"${MYSQL_HOST}" -P"${MYSQL_PORT}" -u"${MYSQL_USER}" "${MYSQL_DATABASE}" \
             --default-character-set=utf8mb4 \
             --batch \
-            -e "${sql_query}" | \
+            -e "${sql_query}" 2>"$tmp_mysql_stderr" | \
             awk -v OFS="${CSV_FIELD_TERMINATOR}" -v QUOTE="${CSV_FIELD_ENCLOSURE}" \
                 "$_AWK_CSV" > "$output_file"; then
             mysql_status=0
@@ -478,20 +493,31 @@ execute_query() {
 
     if [[ $mysql_status -ne 0 ]]; then
         rm -f "$output_file"
+        if [[ -s "$tmp_mysql_stderr" ]]; then
+            log_error "MySQL error: $(cat "$tmp_mysql_stderr")"
+        fi
+        rm -f "$tmp_mysql_stderr"
         log_error "Failed to execute query"
         return 1
     fi
 
     if [[ ! -f "$output_file" ]]; then
+        rm -f "$tmp_mysql_stderr"
         log_error "Output file was not created: $output_file"
         return 1
     fi
 
     if [[ ! -s "$output_file" ]]; then
         rm -f "$output_file"
+        if [[ -s "$tmp_mysql_stderr" ]]; then
+            log_error "MySQL error: $(cat "$tmp_mysql_stderr")"
+        fi
+        rm -f "$tmp_mysql_stderr"
         log_error "Output file is empty (query produced no output): $output_file"
         return 1
     fi
+
+    rm -f "$tmp_mysql_stderr"
 
     log "Successfully generated CSV file: $output_file"
     return 0
@@ -534,8 +560,10 @@ upload_log_to_sftp() {
 
     log "Uploading log file to SFTP: ${SFTP_LOG_REMOTE_DIR}/${log_filename}"
 
-    # Attempt to create the remote log directory (not fatal if it already exists)
-    run_sftp_batch "$hostkey_opts" "$(printf 'mkdir "%s"\nbye' "${SFTP_LOG_REMOTE_DIR}")" >/dev/null 2>&1 || true
+    # Create the remote log directory only if it does not already exist
+    if ! run_sftp_batch "$hostkey_opts" "$(printf 'ls "%s"\nbye' "${SFTP_LOG_REMOTE_DIR}")" "true"; then
+        run_sftp_batch "$hostkey_opts" "$(printf 'mkdir "%s"\nbye' "${SFTP_LOG_REMOTE_DIR}")" "true" || true
+    fi
 
     local sftp_batch
     sftp_batch="$(printf 'cd "%s"\nput "%s" "%s"\nrename "%s" "%s"\nbye\n' \
@@ -630,6 +658,28 @@ main() {
     while IFS= read -r -d '' sql_file; do
         sql_files+=("$sql_file")
     done < <(find "$SQL_DIR" -type f -name "*.sql" -print0 | sort -z)
+
+    # Filter files if --only was provided (comma-separated base names, with or without .sql)
+    if [[ -n "${ONLY_FILES}" ]]; then
+        local filtered_files=()
+        local IFS_backup="$IFS"
+        IFS=',' read -r -a only_names <<< "${ONLY_FILES}"
+        IFS="$IFS_backup"
+        for sql_file in "${sql_files[@]}"; do
+            local base
+            base="$(basename "$sql_file" .sql)"
+            for name in "${only_names[@]}"; do
+                name="${name%.sql}"  # strip .sql if provided
+                name="${name// /}"   # strip spaces
+                if [[ "$base" == "$name" ]]; then
+                    filtered_files+=("$sql_file")
+                    break
+                fi
+            done
+        done
+        sql_files=("${filtered_files[@]}")
+        log "Filter --only applied: processing ${#sql_files[@]} file(s) out of $(find "$SQL_DIR" -type f -name '*.sql' | wc -l | tr -d ' ')"
+    fi
 
     if [[ ${#sql_files[@]} -eq 0 ]]; then
         log "No SQL files found in: $SQL_DIR"
